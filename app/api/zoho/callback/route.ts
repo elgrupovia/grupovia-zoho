@@ -1,10 +1,7 @@
-// app/lib/zoho.ts
-type TokenCache = {
-  accessToken: string;
-  expiresAt: number; // epoch ms
-};
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-let cache: TokenCache | null = null;
+import { NextResponse } from "next/server";
 
 function mustEnv(name: string) {
   const v = process.env[name];
@@ -12,56 +9,65 @@ function mustEnv(name: string) {
   return v;
 }
 
-export async function getZohoAccessToken(): Promise<string> {
-  // cache 55 min (Zoho suele dar 3600s)
-  if (cache && Date.now() < cache.expiresAt) return cache.accessToken;
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const code = url.searchParams.get("code");
+  const error = url.searchParams.get("error");
 
-  const accounts = mustEnv("ZOHO_ACCOUNTS_URL");
-  const clientId = mustEnv("ZOHO_CLIENT_ID");
-  const clientSecret = mustEnv("ZOHO_CLIENT_SECRET");
-  const refreshToken = mustEnv("ZOHO_REFRESH_TOKEN");
-
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    client_id: clientId,
-    client_secret: clientSecret,
-    refresh_token: refreshToken
-  });
-
-  const r = await fetch(`${accounts}/oauth/v2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body
-  });
-
-  const raw = await r.text();
-  if (!r.ok) {
-    throw new Error(`Zoho token refresh failed (${r.status}): ${raw}`);
+  if (error) {
+    return NextResponse.json({ ok: false, error }, { status: 400 });
   }
 
-  const data = JSON.parse(raw) as {
-    access_token: string;
-    expires_in: number;
+  if (!code) {
+    return NextResponse.json({ ok: false, error: "Missing ?code" }, { status: 400 });
+  }
+
+  const accountsUrl = mustEnv("ZOHO_ACCOUNTS_URL");        // https://accounts.zoho.eu
+  const clientId = mustEnv("ZOHO_CLIENT_ID");
+  const clientSecret = mustEnv("ZOHO_CLIENT_SECRET");
+
+  // ⚠️ En Vercel esto debe ser tu URL pública, NO localhost
+  const redirectUri = mustEnv("ZOHO_REDIRECT_URI");        // https://tu-app.vercel.app/api/zoho/callback
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    code,
+  });
+
+  const res = await fetch(`${accountsUrl}/oauth/v2/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+    cache: "no-store",
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    return NextResponse.json(
+      { ok: false, status: res.status, zoho: data },
+      { status: 500 }
+    );
+  }
+
+  // ✅ Aquí Zoho suele devolver access_token y (a veces) refresh_token.
+  // IMPORTANTÍSIMO: no devuelvas tokens tal cual en producción.
+  // Para debug puntual puedes devolverlos *redactados*:
+  const safe = {
+    ok: true,
+    received: {
+      access_token: data?.access_token ? "[REDACTED]" : null,
+      refresh_token: data?.refresh_token ? "[REDACTED]" : null,
+      api_domain: data?.api_domain ?? null,
+      expires_in: data?.expires_in ?? null,
+      token_type: data?.token_type ?? null,
+    },
+    // Si necesitas capturar refresh_token para guardarlo en Vercel manualmente,
+    // míralo en logs del servidor (console.log) de forma temporal y luego elimínalo.
   };
 
-  cache = {
-    accessToken: data.access_token,
-    // un poco antes de que expire
-    expiresAt: Date.now() + Math.max(30, data.expires_in - 60) * 1000
-  };
-
-  return cache.accessToken;
-}
-
-export function zohoApiBase() {
-  return mustEnv("ZOHO_CRM_API_BASE");
-}
-
-export function zohoWebBase() {
-  return process.env.ZOHO_CRM_WEB || "https://crm.zoho.eu";
-}
-
-export function zohoEventsModuleApiName() {
-  // tu módulo REAL (CustomModule1) es "Eventos"
-  return process.env.ZOHO_EVENTS_MODULE_API_NAME || "Eventos";
+  return NextResponse.json(safe);
 }
